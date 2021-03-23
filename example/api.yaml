@@ -1,0 +1,32 @@
+---
+# API service version 1
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: api
+spec:
+  replicas: 3
+  # Ensure rolling deploys
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+        metrics: enabled
+    spec:
+      containers:
+      - name: api
+        image: nicholasjackson/fake-service:v0.20.0
+        ports:
+        - containerPort: 9090
+        env:
+        - name: "LISTEN_ADDR"
+          value: "127.0.0.1:9090"
+        - name: "NAME"
+          value: "api"
+        - name: "MESSAGE"
+          value: "Response from API"
