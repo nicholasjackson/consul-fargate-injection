@@ -17,7 +17,7 @@ var deployment = flag.String("deployment", "", "Path to the kubernetes deploymen
 var upstreams = flag.String("upstreams", "", "Space delimited string of upstream services to add. e.g: api:9090 web:9091")
 var service = flag.String("service", "", "Name of the service to create in Consul")
 var port = flag.String("port", "", "Port the service is exposed on")
-var aclEnabled = flag.Bool("acl-enabled", false, "Are ACLs enabled for the server?")
+var aclEnabled = flag.Bool("acl-enabled", false, "ACLs are enabled for the server, setting this option will enable consul login using the service account token")
 
 var consulServer = flag.String("consul-server", "consul-server.default.svc", "Address of the Consul server")
 

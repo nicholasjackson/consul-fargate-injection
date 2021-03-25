@@ -49,6 +49,8 @@ Usage of /tmp/go-build684716463/b001/exe/main:
         Name of the service to create in Consul
   -upstreams string
         Space delimited string of upstream services to add. e.g: api:9090 web:9091
+  -acl-enabled
+        ACLs are enabled for the server, setting this option will enable consul login using the service account token
 ```
 
 Given the standard Kubernetes deployment `web.yaml`:
