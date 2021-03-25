@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"strings"
@@ -15,12 +17,18 @@ var deployment = flag.String("deployment", "", "Path to the kubernetes deploymen
 var upstreams = flag.String("upstreams", "", "Space delimited string of upstream services to add. e.g: api:9090 web:9091")
 var service = flag.String("service", "", "Name of the service to create in Consul")
 var port = flag.String("port", "", "Port the service is exposed on")
+var aclEnabled = flag.Bool("acl-enabled", false, "Are ACLs enabled for the server?")
+
+var consulServer = flag.String("consul-server", "consul-server.default.svc", "Address of the Consul server")
+
 var help = flag.Bool("help", false, "Usage instructions")
 
 type data struct {
-	Upstreams []upstream
-	Service   string
-	Port      string
+	Upstreams    []upstream
+	Service      string
+	Port         string
+	ACLsEnabled  bool
+	ConsulServer string
 }
 
 type upstream struct {
@@ -45,8 +53,9 @@ consul-injection \
 	--upstreams "api:9091" \
 	--deployment ./example/web.yaml \
 	--service web --port 9090 \
-	> output.yaml
-`)
+	> output.yaml`)
+
+		fmt.Println("")
 		flag.Usage()
 		os.Exit(0)
 	}
@@ -55,17 +64,24 @@ consul-injection \
 		fmt.Println("Please specify the service name")
 
 		flag.Usage()
+		os.Exit(1)
 	}
 
 	if *port == "" {
 		fmt.Println("Please specify the port name")
 
 		flag.Usage()
+		os.Exit(1)
 	}
 
 	d := newData()
 	d.Service = *service
 	d.Port = *port
+	d.ConsulServer = *consulServer
+
+	if *aclEnabled {
+		d.ACLsEnabled = true
+	}
 
 	if *upstreams != "" {
 		services := strings.Split(*upstreams, " ")
@@ -89,59 +105,80 @@ consul-injection \
 		os.Exit(1)
 	}
 
-	newDeployment, err := appendToDeployment(
-		*deployment,
-		sidecarTemplate["containers"].([]interface{}),
-		sidecarTemplate["initContainers"].([]interface{}),
-		sidecarTemplate["volumes"].([]interface{}),
-	)
-
+	data, err := ioutil.ReadFile(*deployment)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("Unable to read deployment file %s: %s", *deployment, err)
 		os.Exit(1)
 	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 
-	out, err := yaml.Marshal(newDeployment)
+	for {
+		var value map[string]interface{}
+		err := dec.Decode(&value)
+		if err == io.EOF {
+			break
+		}
 
-	// write the processed template
-	tmpl, _ := template.New("test").Parse(string(out))
-	tmpl.Execute(os.Stdout, d)
+		if err != nil {
+			fmt.Printf("Unable to process deployment file %s: %s", *deployment, err)
+			os.Exit(1)
+		}
+
+		fmt.Println("---")
+
+		if value["kind"] != "Deployment" {
+			out, _ := yaml.Marshal(value)
+			fmt.Fprintln(os.Stdout, string(out))
+			continue
+		}
+
+		value, err = appendToDeployment(
+			value,
+			sidecarTemplate["containers"].([]interface{}),
+			sidecarTemplate["initContainers"].([]interface{}),
+			sidecarTemplate["volumes"].([]interface{}),
+		)
+
+		if err != nil {
+			fmt.Printf("Unable to add sidecars to deployment %s: %s", *deployment, err)
+			os.Exit(1)
+		}
+
+		out, err := yaml.Marshal(value)
+		if err != nil {
+			fmt.Printf("Unable to add sidecars to deployment %s: %s", *deployment, err)
+			os.Exit(1)
+		}
+
+		// write the processed template
+		tmpl, _ := template.New("test").Parse(string(out))
+		tmpl.Execute(os.Stdout, d)
+	}
+
 }
 
-func appendToDeployment(path string, containers []interface{}, initContainers []interface{}, volumes []interface{}) (map[string]interface{}, error) {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to read deployment file %s: %s", path, err)
-	}
-
-	deployment := map[string]interface{}{}
-
-	err = yaml.Unmarshal(data, &deployment)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to parse deployment file %s: %s", path, err)
-	}
-
+func appendToDeployment(deployment map[string]interface{}, containers []interface{}, initContainers []interface{}, volumes []interface{}) (map[string]interface{}, error) {
 	// get the containers
 	spec, ok := deployment["spec"].(map[interface{}]interface{})
 	if !ok {
 		fmt.Println(deployment["spec"])
-		return nil, fmt.Errorf("Unable to parse deployment file %s. Deployment does not contain a 'spec'", path)
+		return nil, fmt.Errorf("Unable to parse deployment. Deployment does not contain a 'spec'")
 	}
 
 	template, ok := spec["template"].(map[interface{}]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Unable to parse deployment file %s. Deployment does not contain a 'template'", path)
+		return nil, fmt.Errorf("Unable to parse deployment. Deployment does not contain a 'template'")
 	}
 
 	spec, ok = template["spec"].(map[interface{}]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Unable to parse deployment file %s. Deployment does not contain a template 'spec'", path)
+		return nil, fmt.Errorf("Unable to parse deployment. Deployment does not contain a template 'spec'")
 	}
 
 	c, ok := spec["containers"].([]interface{})
 	if !ok {
 		fmt.Printf("%#v", spec["containers"])
-		return nil, fmt.Errorf("Unable to parse deployment file %s. Deployment does not contain any 'containers'", path)
+		return nil, fmt.Errorf("Unable to parse deployment. Deployment does not contain any 'containers'")
 	}
 
 	c = append(c, containers...)
@@ -174,6 +211,7 @@ containers:
   - /bin/sh
   - -ec
   - |
+
     exec /bin/consul agent \
       -node="${HOSTNAME}" \
       -advertise="${POD_IP}" \
@@ -186,6 +224,7 @@ containers:
       -data-dir=/consul/data \
       -retry-join="${CONSUL_SVC_ADDRESS}" \
       -domain=consul
+      {{if .ACLsEnabled}}-token-file="/consul/config/acl-token"{{end}}
   env:
   - name: POD_IP
     valueFrom:
@@ -202,7 +241,8 @@ containers:
       fieldRef:
         fieldPath: metadata.name
   - name: CONSUL_SVC_ADDRESS
-    value: consul-server.default.svc:8301
+    value: "{{ .ConsulServer }}:8301"
+
   - name: SERVICE_NAME
     value: "{{ .Service }}"
   - name: SERVICE_PORT
@@ -262,6 +302,7 @@ containers:
   - -ec
   - |
     /consul/bin/consul connect envoy \
+    {{if .ACLsEnabled}}-token-file="/consul/config/acl-token" \{{end}}
     -proxy-id="${SERVICE_NAME}-sidecar-proxy-${POD_NAME}" \
     -bootstrap > /consul/envoy/envoy-bootstrap.yaml
     envoy \
@@ -282,6 +323,8 @@ containers:
   terminationMessagePath: /dev/termination-log
   terminationMessagePolicy: File
   volumeMounts:
+  - mountPath: /consul/config
+    name: consul-connect-config-data
   - mountPath: /consul/envoy
     name: consul-connect-envoy-data
   - mountPath: /consul/bin
@@ -346,6 +389,16 @@ initContainers:
 
     }
     EOF
+
+    {{if .ACLsEnabled }}
+    # Authenticate with Consul to obtain an ACL token
+    /bin/consul login -method="consul-k8s-auth-method" \
+      -bearer-token-file="/var/run/secrets/kubernetes.io/serviceaccount/token" \
+      -token-sink-file="/consul/config/acl-token" \
+      -meta="pod=${NAMESPACE}/${POD_NAME}"
+    
+    chmod 444 /consul/config/acl-token
+    {{- end}}
     
     # Copy the Consul binary
     cp /bin/consul /consul/bin/consul
@@ -368,6 +421,8 @@ initContainers:
     value: "{{ .Service }}"
   - name: SERVICE_PORT
     value: "{{ .Port }}"
+  - name: CONSUL_HTTP_ADDR
+    value: http://{{ .ConsulServer }}:8500
   image: hashicorp/consul:1.9.1
   imagePullPolicy: IfNotPresent
   volumeMounts:
